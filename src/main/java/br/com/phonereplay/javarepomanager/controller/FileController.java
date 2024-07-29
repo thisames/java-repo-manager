@@ -1,55 +1,75 @@
 package br.com.phonereplay.javarepomanager.controller;
 
-import com.google.cloud.storage.Blob;
-import com.google.cloud.storage.BlobId;
-import com.google.cloud.storage.BlobInfo;
-import com.google.cloud.storage.Storage;
+import io.minio.MinioClient;
+import io.minio.PutObjectArgs;
+import io.minio.GetObjectArgs;
+import io.minio.errors.MinioException;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import javax.crypto.Cipher;
-import javax.crypto.KeyGenerator;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.security.GeneralSecurityException;
-import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
 
 @RestController
 @RequestMapping("/api")
 public class FileController {
 
-    @Value("${gcs.bucket.name}")
+    @Value("${minio.url}")
+    private String minioUrl;
+
+    @Value("${minio.accessKey}")
+    private String minioAccessKey;
+
+    @Value("${minio.secretKey}")
+    private String minioSecretKey;
+
+    @Value("${minio.bucketName}")
     private String bucketName;
 
     @Value("${encryption.key}")
     private String encryptionKey;
 
-    private final Storage storage;
+    private MinioClient minioClient;
 
-    public FileController(Storage storage) {
-        this.storage = storage;
+    public FileController() {
+        minioClient = MinioClient.builder()
+                .endpoint(minioUrl)
+                .credentials(minioAccessKey, minioSecretKey)
+                .build();
     }
 
     @PostMapping("/upload")
     public ResponseEntity<String> uploadFile(@RequestParam("aar") MultipartFile file,
                                              @RequestParam("groupID") String groupId,
                                              @RequestParam("artifactID") String artifactId,
-                                             @RequestParam("version") String version) throws IOException {
-        String objectName = String.format("%s/%s/%s/%s-%s.aar",
-                groupId.replace('.', '/'), artifactId, version, artifactId, version);
+                                             @RequestParam("version") String version) {
+        try {
+            String objectName = String.format("%s/%s/%s/%s-%s.aar",
+                    groupId.replace('.', '/'), artifactId, version, artifactId, version);
 
-        BlobId blobId = BlobId.of(bucketName, objectName);
-        BlobInfo blobInfo = BlobInfo.newBuilder(blobId).setContentType("application/octet-stream").build();
-        storage.create(blobInfo, file.getBytes());
+            minioClient.putObject(
+                    PutObjectArgs.builder()
+                            .bucket(bucketName)
+                            .object(objectName)
+                            .stream(file.getInputStream(), file.getSize(), -1)
+                            .contentType(file.getContentType())
+                            .build()
+            );
 
-        return ResponseEntity.ok("File uploaded successfully!");
+            return ResponseEntity.ok("File uploaded successfully!");
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.status(500).body("Error uploading file");
+        }
     }
 
     @GetMapping("/download/{groupId}/{artifactId}/{version}/{fileName}")
@@ -57,16 +77,23 @@ public class FileController {
                                                @PathVariable String artifactId,
                                                @PathVariable String version,
                                                @PathVariable String fileName) {
-        String objectName = String.format("%s/%s/%s/%s",
-                groupId.replace('.', '/'), artifactId, version, fileName);
+        try {
+            String objectName = String.format("%s/%s/%s/%s",
+                    groupId.replace('.', '/'), artifactId, version, fileName);
 
-        Blob blob = storage.get(BlobId.of(bucketName, objectName));
-        if (blob == null) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+            byte[] content = minioClient.getObject(
+                    GetObjectArgs.builder()
+                            .bucket(bucketName)
+                            .object(objectName)
+                            .build()
+            ).readAllBytes();
+
+            return ResponseEntity.ok().contentType(MediaType.APPLICATION_OCTET_STREAM).body(content);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.status(500).body(null);
         }
-
-        byte[] content = blob.getContent();
-        return ResponseEntity.ok().contentType(MediaType.APPLICATION_OCTET_STREAM).body(content);
     }
 
     private static byte[] decrypt(byte[] encryptedData, String key) throws GeneralSecurityException {
